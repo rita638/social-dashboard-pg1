@@ -142,6 +142,21 @@ df_tt = clean_tiktok_data(df_tt)
 tab1, tab2 = st.tabs(["Instagram", "TikTok"])
 
 with tab1:
+st.subheader("Filters")
+
+date_range = st.selectbox(
+    "Select Date Range",
+    ["All Time", "Last 30 Days", "Last 90 Days"]
+)
+
+df_ig_filtered = df_ig.copy()
+
+if date_range == "Last 30 Days":
+    df_ig_filtered = df_ig[df_ig["date"] >= (pd.Timestamp.today() - pd.Timedelta(days=30))]
+
+elif date_range == "Last 90 Days":
+    df_ig_filtered = df_ig[df_ig["date"] >= (pd.Timestamp.today() - pd.Timedelta(days=90))]
+
     st.header("Instagram")
 
     total_views = df_ig["views"].sum()
