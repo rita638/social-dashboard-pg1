@@ -142,26 +142,52 @@ df_tt = clean_tiktok_data(df_tt)
 tab1, tab2 = st.tabs(["Instagram", "TikTok"])
 
 with tab1:
-st.subheader("Filters")
+    st.subheader("Filters")
 
-date_range = st.selectbox(
-    "Select Date Range",
-    ["All Time", "Last 30 Days", "Last 90 Days"]
-)
+    date_range = st.selectbox(
+        "Select Date Range",
+        ["All Time", "Last 30 Days", "Last 90 Days", "Custom Range"]
+    )
 
-df_ig_filtered = df_ig.copy()
+    df_ig_filtered = df_ig.copy()
 
-if date_range == "Last 30 Days":
-    df_ig_filtered = df_ig[df_ig["date"] >= (pd.Timestamp.today() - pd.Timedelta(days=30))]
+    if date_range == "Last 30 Days":
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
+        df_ig_filtered = df_ig[df_ig["date"] >= cutoff]
+    elif date_range == "Last 90 Days":
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=90)
+        df_ig_filtered = df_ig[df_ig["date"] >= cutoff]
+    elif date_range == "Custom Range":
+        min_date = df_ig["date"].min().date()
+        max_date = df_ig["date"].max().date()
+        custom_range = st.date_input(
+            "Select Custom Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
 
-elif date_range == "Last 90 Days":
-    df_ig_filtered = df_ig[df_ig["date"] >= (pd.Timestamp.today() - pd.Timedelta(days=90))]
+        if isinstance(custom_range, tuple) and len(custom_range) == 2:
+            start_date, end_date = custom_range
+        elif isinstance(custom_range, list) and len(custom_range) == 2:
+            start_date, end_date = custom_range
+        elif custom_range:
+            start_date = custom_range
+            end_date = max_date
+        else:
+            start_date, end_date = min_date, max_date
+
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        df_ig_filtered = df_ig[
+            (df_ig["date"] >= start_ts) & (df_ig["date"] <= end_ts)
+        ]
 
     st.header("Instagram")
 
-    total_views = df_ig["views"].sum()
-    total_interactions = df_ig["all_interactions"].sum()
-    avg_engagement_rate = df_ig["engagement_rate"].mean()
+    total_views = df_ig_filtered["views"].sum()
+    total_interactions = df_ig_filtered["all_interactions"].sum()
+    avg_engagement_rate = df_ig_filtered["engagement_rate"].mean()
 
     col1, col2, col3 = st.columns(3)
 
@@ -174,12 +200,14 @@ elif date_range == "Last 90 Days":
     with col3:
         st.metric("Avg Engagement Rate", f"{avg_engagement_rate:.2f}%")
 
-    monthly_views = df_ig.set_index("date").resample("M")["views"].sum().reset_index()
+    monthly_views = (
+        df_ig_filtered.set_index("date").resample("M")["views"].sum().reset_index()
+    )
 
     fig = px.bar(monthly_views, x="date", y="views", title="Instagram Views by Month")
     st.plotly_chart(fig, use_container_width=True)
 
-    top_posts = df_ig.sort_values(by="views", ascending=False).head(5)
+    top_posts = df_ig_filtered.sort_values(by="views", ascending=False).head(5)
 
     st.subheader("Top 5 Instagram Posts by Views")
     st.dataframe(
