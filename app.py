@@ -184,46 +184,202 @@ with tab1:
         ]
 
     st.header("Instagram")
+    df_ig_display = df_ig_filtered.copy()
+    df_ig_display["save_share_rate"] = (
+        (df_ig_display["saves"] + df_ig_display["share"])
+        .div(df_ig_display["views"].replace(0, pd.NA))
+        .mul(100)
+        .fillna(0)
+    )
 
-    total_views = df_ig_filtered["views"].sum()
-    total_interactions = df_ig_filtered["all_interactions"].sum()
-    avg_engagement_rate = df_ig_filtered["engagement_rate"].mean()
+    pg_posted_raw = df_ig_display["pg_posted"].astype(str).str.strip().str.lower()
+    df_ig_display["pg_posted_flag"] = pg_posted_raw.map(
+        {
+            "true": True,
+            "false": False,
+            "yes": True,
+            "no": False,
+            "1": True,
+            "0": False,
+        }
+    )
+    df_ig_display["content_source"] = df_ig_display["pg_posted_flag"].map(
+        {
+            True: "PG Posted",
+            False: "Influencer",
+        }
+    ).fillna("Unknown")
 
-    col1, col2, col3 = st.columns(3)
+    influencer_df = df_ig_display[df_ig_display["pg_posted_flag"] == False]
+    listing_df = df_ig_display[
+        df_ig_display["campaign"].astype(str).str.strip().str.lower() == "listing"
+    ]
 
-    with col1:
-        st.metric("Total Views", f"{int(total_views):,}")
+    def format_delta(value, target):
+        if pd.isna(value):
+            return None
+        return f"{value - target:+.2f} pts"
 
-    with col2:
-        st.metric("Total Interactions", f"{int(total_interactions):,}")
+    def format_percent(value):
+        if pd.isna(value):
+            return "N/A"
+        return f"{value:.2f}%"
 
-    with col3:
-        st.metric("Avg Engagement Rate", f"{avg_engagement_rate:.2f}%")
+    def format_number(value):
+        if pd.isna(value):
+            return "N/A"
+        return f"{int(value):,}"
+
+    st.subheader("Key Results")
+    kr_cols = st.columns(5)
+
+    median_save_share_rate = df_ig_display["save_share_rate"].median()
+    median_engagement_rate = df_ig_display["engagement_rate"].median()
+    median_video_views = df_ig_display["views"].median()
+    median_youth_viewership = df_ig_display["percentage_of_youthviewers"].median()
+    median_influencer_youth = influencer_df["percentage_of_youthviewers"].median()
+
+    with kr_cols[0]:
+        st.metric(
+            "Median Save + Share Rate",
+            format_percent(median_save_share_rate),
+            delta=format_delta(median_save_share_rate, 2.0),
+        )
+    with kr_cols[1]:
+        st.metric(
+            "Median Engagement Rate",
+            format_percent(median_engagement_rate),
+            delta=format_delta(median_engagement_rate, 1.8),
+        )
+    with kr_cols[2]:
+        st.metric(
+            "IG Median Video Views",
+            format_number(median_video_views),
+            delta=None if pd.isna(median_video_views) else f"{int(median_video_views - 10000):+,}",
+        )
+    with kr_cols[3]:
+        st.metric(
+            "Median Youth Viewership %",
+            format_percent(median_youth_viewership),
+            delta=format_delta(median_youth_viewership, 15.0),
+        )
+    with kr_cols[4]:
+        st.metric(
+            "Median Influencer Youth %",
+            format_percent(median_influencer_youth),
+            delta=format_delta(median_influencer_youth, 25.0),
+        )
+
+    st.subheader("Diagnostics")
 
     monthly_views = (
-        df_ig_filtered.set_index("date").resample("M")["views"].sum().reset_index()
+        df_ig_display.set_index("date").resample("M")["views"].sum().reset_index()
     )
+    monthly_views["month_label"] = monthly_views["date"].dt.strftime("%b %Y")
+    fig_monthly_views = px.line(
+        monthly_views,
+        x="date",
+        y="views",
+        markers=True,
+        title="Monthly Views Trend",
+    )
+    fig_monthly_views.update_layout(xaxis_title="", yaxis_title="Views")
 
-    fig = px.bar(monthly_views, x="date", y="views", title="Instagram Views by Month")
-    st.plotly_chart(fig, use_container_width=True)
+    campaign_metrics = (
+        df_ig_display.groupby("campaign", dropna=False)
+        .agg(
+            median_engagement_rate=("engagement_rate", "median"),
+            median_save_share_rate=("save_share_rate", "median"),
+        )
+        .reset_index()
+    )
+    campaign_metrics["campaign"] = campaign_metrics["campaign"].fillna("Unknown")
+    campaign_metrics = campaign_metrics.sort_values("campaign")
 
-    top_posts = df_ig_filtered.sort_values(by="views", ascending=False).head(5)
+    fig_campaign_engagement = px.bar(
+        campaign_metrics,
+        x="campaign",
+        y="median_engagement_rate",
+        title="Median Engagement Rate by Campaign",
+    )
+    fig_campaign_engagement.update_layout(xaxis_title="", yaxis_title="Median Engagement Rate (%)")
 
-    st.subheader("Top 5 Instagram Posts by Views")
-    st.dataframe(
-        top_posts[
+    fig_campaign_save_share = px.bar(
+        campaign_metrics,
+        x="campaign",
+        y="median_save_share_rate",
+        title="Median Save + Share Rate by Campaign",
+    )
+    fig_campaign_save_share.update_layout(xaxis_title="", yaxis_title="Median Save + Share Rate (%)")
+
+    youth_source = (
+        df_ig_display[df_ig_display["content_source"] != "Unknown"]
+        .groupby("content_source")
+        .agg(median_youth_viewership=("percentage_of_youthviewers", "median"))
+        .reset_index()
+    )
+    fig_youth_source = px.bar(
+        youth_source,
+        x="content_source",
+        y="median_youth_viewership",
+        title="Youth Viewership: PG Posted vs Influencer",
+    )
+    fig_youth_source.update_layout(xaxis_title="", yaxis_title="Median Youth Viewership (%)")
+
+    top_youth_posts = df_ig_display.sort_values(
+        by="percentage_of_youthviewers",
+        ascending=False,
+    ).head(5)
+    top_youth_posts["post_label"] = top_youth_posts["date"].dt.strftime("%d %b %Y")
+    fig_top_youth_posts = px.bar(
+        top_youth_posts.sort_values("percentage_of_youthviewers"),
+        x="percentage_of_youthviewers",
+        y="post_label",
+        orientation="h",
+        hover_data=["campaign", "views", "engagement_rate", "save_share_rate", "link"],
+        title="Top 5 Posts by Youth Viewership",
+    )
+    fig_top_youth_posts.update_layout(xaxis_title="Youth Viewership (%)", yaxis_title="")
+
+    diag_col1, diag_col2 = st.columns(2)
+    with diag_col1:
+        st.plotly_chart(fig_monthly_views, use_container_width=True)
+        st.plotly_chart(fig_campaign_save_share, use_container_width=True)
+        st.plotly_chart(fig_top_youth_posts, use_container_width=True)
+    with diag_col2:
+        st.plotly_chart(fig_campaign_engagement, use_container_width=True)
+        st.plotly_chart(fig_youth_source, use_container_width=True)
+
+    st.subheader('Campaign Deep Dive: "listing"')
+
+    deep_dive_col1, deep_dive_col2 = st.columns([1, 2])
+    with deep_dive_col1:
+        st.markdown("**Listing Summary**")
+        st.metric("Median Views", format_number(listing_df["views"].median()))
+        st.metric(
+            "Median Save + Share Rate",
+            format_percent(listing_df["save_share_rate"].median()),
+        )
+        st.metric(
+            "Median Youth Viewership",
+            format_percent(listing_df["percentage_of_youthviewers"].median()),
+        )
+
+    with deep_dive_col2:
+        listing_table = listing_df[
             [
                 "date",
-                "format",
-                "post_or_story",
                 "views",
-                "all_interactions",
                 "engagement_rate",
+                "save_share_rate",
+                "percentage_of_youthviewers",
                 "link",
             ]
-        ],
-        use_container_width=True
-    )
+        ].sort_values("date", ascending=False)
+        if listing_table.empty:
+            st.info('No "listing" campaign posts are available for the current Instagram date filter.')
+        else:
+            st.dataframe(listing_table, use_container_width=True)
 
 with tab2:
     st.header("TikTok")
