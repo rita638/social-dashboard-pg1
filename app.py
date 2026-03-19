@@ -18,7 +18,7 @@ def load_data():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
 
-    workbook = client.open("CLEAN DATA")
+    workbook = client.open_by_key(st.secrets["google_sheet_key"])
 
     ig_sheet = workbook.worksheet("instagram")
     tt_sheet = workbook.worksheet("tiktok")
