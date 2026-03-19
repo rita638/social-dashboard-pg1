@@ -7,7 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.title("📊 Social Performance Dashboard")
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def load_data():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -29,7 +29,29 @@ def load_data():
     return df_ig, df_tt
 
 
+def normalize_columns(df):
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_", regex=False)
+    )
+    return df
+
+
+def find_column(df, exact_name, contains_name=None):
+    if exact_name in df.columns:
+        return exact_name
+    if contains_name is not None:
+        for col in df.columns:
+            if contains_name in col:
+                return col
+    return None
+
+
 def clean_instagram_data(df):
+    df = normalize_columns(df)
     df["date"] = pd.to_datetime(
         df["date"],
         format="%d/%m/%Y",
@@ -86,6 +108,7 @@ def clean_instagram_data(df):
 
 
 def clean_tiktok_data(df):
+    df = normalize_columns(df)
     df["date"] = pd.to_datetime(
         df["date"],
         format="%d/%m/%Y",
@@ -533,42 +556,263 @@ with tab1:
             st.dataframe(listing_table, use_container_width=True)
 
 with tab2:
+    st.subheader("Filters")
+
+    tt_date_range = st.selectbox(
+        "Select Date Range",
+        ["All Time", "Last 30 Days", "Last 90 Days", "Custom Range"],
+        key="tt_date_range",
+    )
+
+    df_tt_filtered = df_tt.copy()
+
+    if tt_date_range == "Last 30 Days":
+        tt_cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
+        df_tt_filtered = df_tt[df_tt["date"] >= tt_cutoff]
+    elif tt_date_range == "Last 90 Days":
+        tt_cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=90)
+        df_tt_filtered = df_tt[df_tt["date"] >= tt_cutoff]
+    elif tt_date_range == "Custom Range":
+        tt_min_date = df_tt["date"].min().date()
+        tt_max_date = df_tt["date"].max().date()
+        tt_custom_range = st.date_input(
+            "Select Custom Date Range",
+            value=(tt_min_date, tt_max_date),
+            min_value=tt_min_date,
+            max_value=tt_max_date,
+            key="tt_custom_date_range",
+        )
+
+        if isinstance(tt_custom_range, tuple) and len(tt_custom_range) == 2:
+            tt_start_date, tt_end_date = tt_custom_range
+        elif isinstance(tt_custom_range, list) and len(tt_custom_range) == 2:
+            tt_start_date, tt_end_date = tt_custom_range
+        elif tt_custom_range:
+            tt_start_date = tt_custom_range
+            tt_end_date = tt_max_date
+        else:
+            tt_start_date, tt_end_date = tt_min_date, tt_max_date
+
+        tt_start_ts = pd.Timestamp(tt_start_date)
+        tt_end_ts = pd.Timestamp(tt_end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        df_tt_filtered = df_tt[
+            (df_tt["date"] >= tt_start_ts) & (df_tt["date"] <= tt_end_ts)
+        ]
+
     st.header("TikTok")
+    df_tt_display = df_tt_filtered.copy()
+    df_tt_display["save_share_rate"] = (
+        (df_tt_display["saves"] + df_tt_display["share"])
+        .div(df_tt_display["views"].replace(0, pd.NA))
+        .mul(100)
+        .fillna(0)
+    )
 
-    total_views = df_tt["views"].sum()
-    total_interactions = df_tt["all_interactions"].sum()
-    avg_engagement_rate = df_tt["engagement_rate"].mean()
+    tt_pg_posted_col = find_column(df_tt_display, "pg_posted", "pg_posted")
+    if tt_pg_posted_col is not None:
+        tt_pg_posted_raw = df_tt_display[tt_pg_posted_col].astype(str).str.strip().str.lower()
+        df_tt_display["pg_posted_flag"] = tt_pg_posted_raw.map(
+            {
+                "true": True,
+                "false": False,
+                "yes": True,
+                "no": False,
+                "1": True,
+                "0": False,
+            }
+        )
+    else:
+        df_tt_display["pg_posted_flag"] = pd.NA
 
-    col1, col2, col3 = st.columns(3)
+    df_tt_display["content_source"] = df_tt_display["pg_posted_flag"].map(
+        {
+            True: "PG Posted",
+            False: "Influencer",
+        }
+    ).fillna("Unknown")
 
-    with col1:
-        st.metric("Total Views", f"{int(total_views):,}")
+    tt_campaign_col = find_column(df_tt_display, "campaign", "campaign")
+    if tt_campaign_col is not None:
+        campaign_series = df_tt_display[tt_campaign_col].fillna("Unknown").astype(str)
+    else:
+        campaign_series = pd.Series(["Unknown"] * len(df_tt_display), index=df_tt_display.index)
+    df_tt_display["campaign_label"] = campaign_series
 
-    with col2:
-        st.metric("Total Interactions", f"{int(total_interactions):,}")
+    tt_influencer_df = df_tt_display[df_tt_display["pg_posted_flag"] == False]
+    tt_listing_df = df_tt_display[
+        df_tt_display["campaign_label"].astype(str).str.strip().str.lower() == "listing"
+    ]
 
-    with col3:
-        st.metric("Avg Engagement Rate", f"{avg_engagement_rate:.2f}%")
+    st.subheader("Key Results")
+    tt_kr_cols = st.columns(5)
 
-    monthly_views = df_tt.set_index("date").resample("M")["views"].sum().reset_index()
+    tt_median_engagement_rate = df_tt_display["engagement_rate"].median()
+    tt_median_video_views = df_tt_display["views"].median()
+    tt_median_youth_viewership = df_tt_display["percentage_of_youthviewers"].median()
+    tt_median_save_share_rate = df_tt_display["save_share_rate"].median()
+    tt_median_video_watched = df_tt_display["percentage_of_videowatched"].median()
 
-    fig = px.bar(monthly_views, x="date", y="views", title="TikTok Views by Month")
-    st.plotly_chart(fig, use_container_width=True)
+    with tt_kr_cols[0]:
+        render_kr_card(
+            "Median Engagement Rate",
+            format_percent(tt_median_engagement_rate),
+            "",
+            "Median across TikTok videos",
+            True,
+        )
+    with tt_kr_cols[1]:
+        render_kr_card(
+            "Median Views per Video",
+            format_number(tt_median_video_views),
+            "",
+            "Median across TikTok videos",
+            True,
+        )
+    with tt_kr_cols[2]:
+        render_kr_card(
+            "Median Youth Viewership %",
+            format_percent(tt_median_youth_viewership),
+            "",
+            "Median across TikTok videos",
+            True,
+        )
+    with tt_kr_cols[3]:
+        render_kr_card(
+            "Median Save + Share Rate",
+            format_percent(tt_median_save_share_rate),
+            "",
+            "Median across TikTok videos",
+            True,
+        )
+    with tt_kr_cols[4]:
+        render_kr_card(
+            "Median Video Watched %",
+            format_percent(tt_median_video_watched),
+            "",
+            "Median across TikTok videos",
+            True,
+        )
 
-    top_posts = df_tt.sort_values(by="views", ascending=False).head(5)
+    st.subheader("Diagnostics")
 
-    st.subheader("Top 5 TikTok Posts by Views")
-    st.dataframe(
-        top_posts[
+    tt_monthly_views = (
+        df_tt_display.set_index("date").resample("M")["views"].sum().reset_index()
+    )
+    tt_fig_monthly_views = px.line(
+        tt_monthly_views,
+        x="date",
+        y="views",
+        markers=True,
+        title="Monthly Views Trend",
+    )
+    tt_fig_monthly_views.update_layout(xaxis_title="", yaxis_title="Views")
+
+    tt_campaign_metrics = (
+        df_tt_display.groupby("campaign_label", dropna=False)
+        .agg(
+            median_engagement_rate=("engagement_rate", "median"),
+            median_save_share_rate=("save_share_rate", "median"),
+        )
+        .reset_index()
+    )
+    tt_campaign_metrics["campaign_label"] = tt_campaign_metrics["campaign_label"].fillna("Unknown")
+
+    tt_fig_campaign_engagement = px.bar(
+        tt_campaign_metrics.sort_values("median_engagement_rate", ascending=False),
+        x="campaign_label",
+        y="median_engagement_rate",
+        title="Median Engagement Rate by Campaign",
+    )
+    tt_fig_campaign_engagement.update_layout(xaxis_title="", yaxis_title="Median Engagement Rate (%)")
+
+    tt_fig_campaign_save_share = px.bar(
+        tt_campaign_metrics.sort_values("median_save_share_rate", ascending=False),
+        x="campaign_label",
+        y="median_save_share_rate",
+        title="Median Save + Share Rate by Campaign",
+    )
+    tt_fig_campaign_save_share.update_layout(xaxis_title="", yaxis_title="Median Save + Share Rate (%)")
+
+    tt_youth_source = (
+        df_tt_display[df_tt_display["content_source"] != "Unknown"]
+        .groupby("content_source")
+        .agg(median_youth_viewership=("percentage_of_youthviewers", "median"))
+        .reset_index()
+    )
+    tt_fig_youth_source = px.bar(
+        tt_youth_source,
+        x="content_source",
+        y="median_youth_viewership",
+        title="Youth Viewership: PG Posted vs Influencer",
+    )
+    tt_fig_youth_source.update_layout(xaxis_title="", yaxis_title="Median Youth Viewership (%)")
+
+    tt_top_posts_views = df_tt_display.sort_values(by="views", ascending=False).head(5).copy()
+    tt_top_posts_views["post_label"] = tt_top_posts_views["date"].dt.strftime("%d %b %Y")
+    tt_fig_top_views = px.bar(
+        tt_top_posts_views.sort_values("views"),
+        x="views",
+        y="post_label",
+        orientation="h",
+        hover_data=["campaign_label", "engagement_rate", "save_share_rate", "link"],
+        title="Top 5 Posts by Views",
+    )
+    tt_fig_top_views.update_layout(xaxis_title="Views", yaxis_title="")
+
+    tt_top_posts_youth = (
+        df_tt_display.sort_values(by="percentage_of_youthviewers", ascending=False).head(5).copy()
+    )
+    tt_top_posts_youth["post_label"] = tt_top_posts_youth["date"].dt.strftime("%d %b %Y")
+    tt_fig_top_youth = px.bar(
+        tt_top_posts_youth.sort_values("percentage_of_youthviewers"),
+        x="percentage_of_youthviewers",
+        y="post_label",
+        orientation="h",
+        hover_data=["campaign_label", "views", "engagement_rate", "save_share_rate", "link"],
+        title="Top 5 Posts by Youth Viewership",
+    )
+    tt_fig_top_youth.update_layout(xaxis_title="Youth Viewership (%)", yaxis_title="")
+
+    tt_diag_col1, tt_diag_col2 = st.columns(2)
+    with tt_diag_col1:
+        st.plotly_chart(tt_fig_monthly_views, use_container_width=True)
+        st.plotly_chart(tt_fig_campaign_save_share, use_container_width=True)
+        st.plotly_chart(tt_fig_top_views, use_container_width=True)
+    with tt_diag_col2:
+        st.plotly_chart(tt_fig_campaign_engagement, use_container_width=True)
+        if tt_youth_source.empty:
+            st.info("PG Posted vs Influencer comparison is unavailable for the current TikTok data.")
+        else:
+            st.plotly_chart(tt_fig_youth_source, use_container_width=True)
+        st.plotly_chart(tt_fig_top_youth, use_container_width=True)
+
+    st.subheader('Campaign Deep Dive: "listing"')
+
+    tt_deep_dive_col1, tt_deep_dive_col2 = st.columns([1, 2])
+    with tt_deep_dive_col1:
+        st.markdown("**Listing Summary**")
+        st.metric("Median Views", format_number(tt_listing_df["views"].median()))
+        st.metric(
+            "Median Save + Share Rate",
+            format_percent(tt_listing_df["save_share_rate"].median()),
+        )
+        st.metric(
+            "Median Youth Viewership",
+            format_percent(tt_listing_df["percentage_of_youthviewers"].median()),
+        )
+
+    with tt_deep_dive_col2:
+        tt_listing_table = tt_listing_df[
             [
                 "date",
-                "format",
-                "post_or_story",
                 "views",
-                "all_interactions",
                 "engagement_rate",
+                "save_share_rate",
+                "percentage_of_youthviewers",
                 "link",
             ]
-        ],
-        use_container_width=True
-    )
+        ].sort_values("date", ascending=False)
+        if tt_listing_table.empty:
+            st.info('No "listing" campaign posts are available for the current TikTok data.')
+        else:
+            st.dataframe(tt_listing_table, use_container_width=True)
