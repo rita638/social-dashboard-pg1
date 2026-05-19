@@ -377,7 +377,7 @@ with tab1:
     st.subheader("Diagnostics")
 
     monthly_views = (
-        df_ig_display.set_index("date").resample("M")["views"].sum().reset_index()
+        df_ig_display.set_index("date").resample("MS")["views"].sum().reset_index()
     )
     monthly_views["month_label"] = monthly_views["date"].dt.strftime("%b %Y")
     fig_monthly_views = px.line(
@@ -489,7 +489,7 @@ with tab1:
 
     youth_trend = (
         df_ig_display.set_index("date")
-        .resample("M")["percentage_of_youthviewers"]
+        .resample("MS")["percentage_of_youthviewers"]
         .median()
         .dropna()
     )
@@ -716,7 +716,7 @@ with tab2:
     st.subheader("Diagnostics")
 
     tt_monthly_views = (
-        df_tt_display.set_index("date").resample("M")["views"].sum().reset_index()
+        df_tt_display.set_index("date").resample("MS")["views"].sum().reset_index()
     )
     tt_fig_monthly_views = px.line(
         tt_monthly_views,
