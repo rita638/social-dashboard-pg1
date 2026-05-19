@@ -50,6 +50,10 @@ def find_column(df, exact_name, contains_name=None):
     return None
 
 
+def existing_columns(df, columns):
+    return [col for col in columns if col in df.columns]
+
+
 def clean_instagram_data(df):
     df = normalize_columns(df)
     df["date"] = pd.to_datetime(
@@ -251,17 +255,21 @@ with tab1:
         .fillna(0)
     )
 
-    pg_posted_raw = df_ig_display["pg_posted"].astype(str).str.strip().str.lower()
-    df_ig_display["pg_posted_flag"] = pg_posted_raw.map(
-        {
-            "true": True,
-            "false": False,
-            "yes": True,
-            "no": False,
-            "1": True,
-            "0": False,
-        }
-    )
+    ig_pg_posted_col = find_column(df_ig_display, "pg_posted", "pg_posted")
+    if ig_pg_posted_col is not None:
+        pg_posted_raw = df_ig_display[ig_pg_posted_col].astype(str).str.strip().str.lower()
+        df_ig_display["pg_posted_flag"] = pg_posted_raw.map(
+            {
+                "true": True,
+                "false": False,
+                "yes": True,
+                "no": False,
+                "1": True,
+                "0": False,
+            }
+        )
+    else:
+        df_ig_display["pg_posted_flag"] = pd.NA
     df_ig_display["content_source"] = df_ig_display["pg_posted_flag"].map(
         {
             True: "PG Posted",
@@ -269,9 +277,16 @@ with tab1:
         }
     ).fillna("Unknown")
 
+    ig_campaign_col = find_column(df_ig_display, "campaign", "campaign")
+    if ig_campaign_col is not None:
+        ig_campaign_series = df_ig_display[ig_campaign_col].fillna("Unknown").astype(str)
+    else:
+        ig_campaign_series = pd.Series(["Unknown"] * len(df_ig_display), index=df_ig_display.index)
+    df_ig_display["campaign_label"] = ig_campaign_series
+
     influencer_df = df_ig_display[df_ig_display["pg_posted_flag"] == False]
     listing_df = df_ig_display[
-        df_ig_display["campaign"].astype(str).str.strip().str.lower() == "listing"
+        df_ig_display["campaign_label"].astype(str).str.strip().str.lower() == "listing"
     ]
 
     def format_percent(value):
@@ -375,19 +390,19 @@ with tab1:
     fig_monthly_views.update_layout(xaxis_title="", yaxis_title="Views")
 
     campaign_metrics = (
-        df_ig_display.groupby("campaign", dropna=False)
+        df_ig_display.groupby("campaign_label", dropna=False)
         .agg(
             median_engagement_rate=("engagement_rate", "median"),
             median_save_share_rate=("save_share_rate", "median"),
         )
         .reset_index()
     )
-    campaign_metrics["campaign"] = campaign_metrics["campaign"].fillna("Unknown")
-    campaign_metrics = campaign_metrics.sort_values("campaign")
+    campaign_metrics["campaign_label"] = campaign_metrics["campaign_label"].fillna("Unknown")
+    campaign_metrics = campaign_metrics.sort_values("campaign_label")
 
     fig_campaign_engagement = px.bar(
         campaign_metrics.sort_values("median_engagement_rate", ascending=False),
-        x="campaign",
+        x="campaign_label",
         y="median_engagement_rate",
         title="Median Engagement Rate by Campaign",
     )
@@ -402,7 +417,7 @@ with tab1:
 
     fig_campaign_save_share = px.bar(
         campaign_metrics.sort_values("median_save_share_rate", ascending=False),
-        x="campaign",
+        x="campaign_label",
         y="median_save_share_rate",
         title="Median Save + Share Rate by Campaign",
     )
@@ -446,7 +461,10 @@ with tab1:
         x="percentage_of_youthviewers",
         y="post_label",
         orientation="h",
-        hover_data=["campaign", "views", "engagement_rate", "save_share_rate", "link"],
+        hover_data=existing_columns(
+            top_youth_posts,
+            ["campaign_label", "views", "engagement_rate", "save_share_rate", "link"],
+        ),
         title="Top 5 Posts by Youth Viewership",
     )
     fig_top_youth_posts.update_layout(xaxis_title="Youth Viewership (%)", yaxis_title="")
@@ -508,11 +526,11 @@ with tab1:
     insights = []
     if not top_campaign.empty:
         insights.append(
-            f"- Top campaign by median engagement is **{top_campaign.iloc[0]['campaign']}** at **{top_campaign.iloc[0]['median_engagement_rate']:.2f}%**."
+            f"- Top campaign by median engagement is **{top_campaign.iloc[0]['campaign_label']}** at **{top_campaign.iloc[0]['median_engagement_rate']:.2f}%**."
         )
     if not lowest_campaign.empty:
         insights.append(
-            f"- Lowest campaign by median engagement is **{lowest_campaign.iloc[0]['campaign']}** at **{lowest_campaign.iloc[0]['median_engagement_rate']:.2f}%**."
+            f"- Lowest campaign by median engagement is **{lowest_campaign.iloc[0]['campaign_label']}** at **{lowest_campaign.iloc[0]['median_engagement_rate']:.2f}%**."
         )
     if len(youth_trend) >= 2:
         insights.append(
@@ -540,7 +558,8 @@ with tab1:
         )
 
     with deep_dive_col2:
-        listing_table = listing_df[
+        listing_table_columns = existing_columns(
+            listing_df,
             [
                 "date",
                 "views",
@@ -549,7 +568,8 @@ with tab1:
                 "percentage_of_youthviewers",
                 "link",
             ]
-        ].sort_values("date", ascending=False)
+        )
+        listing_table = listing_df[listing_table_columns].sort_values("date", ascending=False)
         if listing_table.empty:
             st.info('No "listing" campaign posts are available for the current Instagram date filter.')
         else:
@@ -754,7 +774,10 @@ with tab2:
         x="views",
         y="post_label",
         orientation="h",
-        hover_data=["campaign_label", "engagement_rate", "save_share_rate", "link"],
+        hover_data=existing_columns(
+            tt_top_posts_views,
+            ["campaign_label", "engagement_rate", "save_share_rate", "link"],
+        ),
         title="Top 5 Posts by Views",
     )
     tt_fig_top_views.update_layout(xaxis_title="Views", yaxis_title="")
@@ -768,7 +791,10 @@ with tab2:
         x="percentage_of_youthviewers",
         y="post_label",
         orientation="h",
-        hover_data=["campaign_label", "views", "engagement_rate", "save_share_rate", "link"],
+        hover_data=existing_columns(
+            tt_top_posts_youth,
+            ["campaign_label", "views", "engagement_rate", "save_share_rate", "link"],
+        ),
         title="Top 5 Posts by Youth Viewership",
     )
     tt_fig_top_youth.update_layout(xaxis_title="Youth Viewership (%)", yaxis_title="")
@@ -802,7 +828,8 @@ with tab2:
         )
 
     with tt_deep_dive_col2:
-        tt_listing_table = tt_listing_df[
+        tt_listing_table_columns = existing_columns(
+            tt_listing_df,
             [
                 "date",
                 "views",
@@ -811,7 +838,8 @@ with tab2:
                 "percentage_of_youthviewers",
                 "link",
             ]
-        ].sort_values("date", ascending=False)
+        )
+        tt_listing_table = tt_listing_df[tt_listing_table_columns].sort_values("date", ascending=False)
         if tt_listing_table.empty:
             st.info('No "listing" campaign posts are available for the current TikTok data.')
         else:
