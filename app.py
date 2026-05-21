@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import gspread
+from html import escape
 from oauth2client.service_account import ServiceAccountCredentials
 
 st.title("📊 Social Performance Dashboard")
@@ -18,7 +19,12 @@ def load_data():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
 
-    workbook = client.open_by_key(st.secrets["google_sheet_key"])
+    sheet_key = st.secrets.get("google_sheet_key")
+    sheet_name = st.secrets.get("google_sheet_name", "PG SOCIAL DATA - Master Sheet (Cleaned)")
+    if sheet_key:
+        workbook = client.open_by_key(sheet_key)
+    else:
+        workbook = client.open(sheet_name)
 
     ig_sheet = workbook.worksheet("instagram")
     tt_sheet = workbook.worksheet("tiktok")
@@ -52,6 +58,303 @@ def find_column(df, exact_name, contains_name=None):
 
 def existing_columns(df, columns):
     return [col for col in columns if col in df.columns]
+
+
+def first_words(value, word_count=3):
+    words = str(value).strip().split()
+    if not words or str(value).strip().lower() in {"", "nan", "none"}:
+        return "Untitled post"
+    return " ".join(words[:word_count])
+
+
+def get_filtered_data(df, date_range, start_date=None, end_date=None):
+    if date_range == "Whole of Prev. Month":
+        current_month_start = pd.Timestamp.today().normalize().replace(day=1)
+        previous_month_start = current_month_start - pd.DateOffset(months=1)
+        previous_month_end = current_month_start - pd.Timedelta(microseconds=1)
+        return df[(df["date"] >= previous_month_start) & (df["date"] <= previous_month_end)]
+    if date_range == "Last 30 Days":
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
+        return df[df["date"] >= cutoff]
+    if date_range == "Last 90 Days":
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=90)
+        return df[df["date"] >= cutoff]
+    if date_range == "Custom Range" and start_date is not None and end_date is not None:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        return df[(df["date"] >= start_ts) & (df["date"] <= end_ts)]
+    return df.copy()
+
+
+def parse_custom_range(selection, min_date, max_date):
+    if isinstance(selection, (tuple, list)):
+        if len(selection) == 2:
+            return selection[0], selection[1]
+        if len(selection) == 1:
+            return selection[0], max_date
+    if selection:
+        return selection, max_date
+    return min_date, max_date
+
+
+def prepare_extract_data(df):
+    extract_df = df.copy()
+
+    if "save_share_rate" not in extract_df.columns and {"saves", "share", "views"}.issubset(extract_df.columns):
+        extract_df["save_share_rate"] = (
+            (extract_df["saves"] + extract_df["share"])
+            .div(extract_df["views"].replace(0, pd.NA))
+            .mul(100)
+            .fillna(0)
+        )
+
+    caption_col = find_column(extract_df, "post_caption", "caption")
+    if caption_col is not None:
+        extract_df["episode_name"] = extract_df[caption_col].apply(first_words)
+    else:
+        extract_df["episode_name"] = extract_df["date"].dt.strftime("%d %b %Y")
+
+    campaign_col = find_column(extract_df, "campaign", "campaign")
+    if campaign_col is not None:
+        extract_df["series_name"] = extract_df[campaign_col].fillna("Unknown").astype(str)
+    else:
+        extract_df["series_name"] = "Unknown"
+    extract_df["series_name"] = extract_df["series_name"].str.strip().replace("", "Unknown")
+
+    return extract_df
+
+
+def render_extract_scorecard(label, value, delta, is_good):
+    delta_class = "good" if is_good else "bad"
+    st.markdown(
+        f"""
+        <div class="extract-scorecard">
+            <div class="extract-card-label">{escape(label)}</div>
+            <div class="extract-card-value">{escape(value)}</div>
+            <div class="extract-delta {delta_class}">{escape(delta)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def make_extract_bar(
+    df,
+    x,
+    y,
+    title,
+    target=None,
+    orientation="v",
+    color_col=None,
+    x_title="",
+    y_title="",
+):
+    color_sequence = ["#A32D2D", "#8F8E88", "#D3D1C7", "#C96D3B", "#6F7F82"]
+    fig = px.bar(
+        df,
+        x=x,
+        y=y,
+        orientation=orientation,
+        color=color_col,
+        color_discrete_sequence=color_sequence,
+        title=title,
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#2D2D2A",
+        plot_bgcolor="#2D2D2A",
+        font={"color": "#F5F1EA", "size": 12},
+        title={"font": {"size": 15}},
+        legend_title_text="",
+        margin={"l": 12, "r": 12, "t": 48, "b": 24},
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+    )
+    fig.update_traces(marker_line_width=0)
+    fig.update_xaxes(gridcolor="rgba(245,241,234,0.12)")
+    fig.update_yaxes(gridcolor="rgba(245,241,234,0.12)")
+    if target is not None:
+        if orientation == "h":
+            fig.add_vline(x=target, line_dash="dash", line_color="#D43C3C")
+        else:
+            fig.add_hline(y=target, line_dash="dash", line_color="#D43C3C")
+    return fig
+
+
+def render_extract_tab(df, platform_label, platform_short, key_prefix, views_target):
+    st.markdown(
+        """
+        <style>
+        .extract-shell { color: #F5F1EA; }
+        .extract-title { font-size: 1.35rem; font-weight: 700; margin-top: 0.75rem; }
+        .extract-sub { color: #B8B4AB; font-size: 0.95rem; margin-bottom: 1.35rem; }
+        .extract-section { color: #AAA59B; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin: 2rem 0 0.8rem; }
+        .extract-highlight { background: #FCEBEB; border-left: 4px solid #A32D2D; padding: 0.9rem 1rem; margin: 1rem 0 1.5rem; }
+        .extract-highlight-label { color: #7A1D1D; font-size: 0.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+        .extract-highlight-title { color: #501313; font-weight: 700; font-size: 0.95rem; }
+        .extract-highlight-sub { color: #7A1D1D; font-size: 0.85rem; margin-top: 0.2rem; }
+        .extract-scorecard { background: #242421; border-radius: 8px; padding: 1rem; min-height: 7.4rem; }
+        .extract-card-label { color: #B8B4AB; font-size: 0.78rem; min-height: 2rem; }
+        .extract-card-value { color: #FFFFFF; font-size: 1.55rem; font-weight: 800; line-height: 1.1; }
+        .extract-delta { font-size: 0.84rem; margin-top: 0.35rem; }
+        .extract-delta.good { color: #1D9E75; }
+        .extract-delta.bad { color: #D85A30; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("Filters")
+    date_range = st.selectbox(
+        "Select Date Range",
+        ["All Time", "Whole of Prev. Month", "Last 30 Days", "Last 90 Days", "Custom Range"],
+        key=f"{key_prefix}_extract_date_range",
+    )
+
+    start_date = None
+    end_date = None
+    if date_range == "Custom Range":
+        min_date = df["date"].min().date()
+        max_date = df["date"].max().date()
+        custom_range = st.date_input(
+            "Select Custom Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key=f"{key_prefix}_extract_custom_date_range",
+        )
+        start_date, end_date = parse_custom_range(custom_range, min_date, max_date)
+
+    extract_df = prepare_extract_data(get_filtered_data(df, date_range, start_date, end_date))
+    if extract_df.empty:
+        st.info(f"No {platform_label} posts are available for the selected extract period.")
+        return
+
+    latest_month = extract_df["date"].max().strftime("%B %Y")
+    top_post = extract_df.sort_values("views", ascending=False).iloc[0]
+    avg_views = extract_df["views"].mean()
+    save_share_median = extract_df["save_share_rate"].median()
+    engagement_median = extract_df["engagement_rate"].median()
+    youth_median = extract_df["percentage_of_youthviewers"].median()
+
+    st.markdown(
+        f"""
+        <div class="extract-shell">
+            <div class="extract-title">Monthly snapshot - {escape(latest_month)}</div>
+            <div class="extract-sub">Auto-generated from {escape(platform_label)} data. Filter by date range above, then copy charts into your newsletter.</div>
+            <div class="extract-highlight">
+                <div class="extract-highlight-label">Star of the month</div>
+                <div class="extract-highlight-title">{escape(top_post["episode_name"])}</div>
+                <div class="extract-highlight-sub">Highest views this period · {int(top_post["views"]):,} views</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="extract-section">Scorecard vs targets</div>', unsafe_allow_html=True)
+    score_cols = st.columns(4)
+    with score_cols[0]:
+        render_extract_scorecard(
+            f"Avg views / video ({platform_short})",
+            format_number(avg_views),
+            f"{format_views_delta(avg_views, views_target)} vs {views_target:,} target",
+            avg_views >= views_target,
+        )
+    with score_cols[1]:
+        render_extract_scorecard(
+            "Median engagement rate",
+            format_percent(engagement_median),
+            "Newsletter context metric",
+            True,
+        )
+    with score_cols[2]:
+        render_extract_scorecard(
+            "Save + share rate",
+            format_percent(save_share_median),
+            f"{format_percent_delta(save_share_median, 2.0)} vs 2% target",
+            save_share_median >= 2.0,
+        )
+    with score_cols[3]:
+        render_extract_scorecard(
+            "Gen Z viewership",
+            format_percent(youth_median),
+            f"{format_percent_delta(youth_median, 6.0)} vs 6% target",
+            youth_median >= 6.0,
+        )
+
+    st.markdown('<div class="extract-section">Series comparison</div>', unsafe_allow_html=True)
+    series_views = (
+        extract_df.groupby("series_name", dropna=False)
+        .agg(avg_views=("views", "mean"))
+        .reset_index()
+        .sort_values("avg_views", ascending=False)
+    )
+    st.plotly_chart(
+        make_extract_bar(
+            series_views,
+            x="series_name",
+            y="avg_views",
+            title=f"Avg views per video by series - {platform_short}",
+            target=views_target,
+            x_title="",
+            y_title="Avg views",
+        ),
+        use_container_width=True,
+    )
+
+    st.markdown('<div class="extract-section">Episode performance</div>', unsafe_allow_html=True)
+    episode_views = (
+        extract_df.sort_values("views", ascending=False)
+        .head(12)
+        .sort_values("views", ascending=True)
+    )
+    st.plotly_chart(
+        make_extract_bar(
+            episode_views,
+            x="views",
+            y="episode_name",
+            title="Views per episode",
+            target=views_target,
+            orientation="h",
+            color_col="series_name",
+            x_title="Views",
+            y_title="",
+        ),
+        use_container_width=True,
+    )
+
+    st.markdown('<div class="extract-section">Engagement quality</div>', unsafe_allow_html=True)
+    quality_cols = st.columns(2)
+    quality_df = extract_df.sort_values("views", ascending=False).head(10)
+    with quality_cols[0]:
+        st.plotly_chart(
+            make_extract_bar(
+                quality_df.sort_values("save_share_rate", ascending=False),
+                x="episode_name",
+                y="save_share_rate",
+                title="Save + share rate by episode",
+                target=2.0,
+                color_col="series_name",
+                x_title="",
+                y_title="Save + share rate (%)",
+            ),
+            use_container_width=True,
+        )
+    with quality_cols[1]:
+        st.plotly_chart(
+            make_extract_bar(
+                quality_df.sort_values("percentage_of_youthviewers", ascending=False),
+                x="episode_name",
+                y="percentage_of_youthviewers",
+                title="Gen Z viewership % by episode",
+                target=6.0,
+                color_col="series_name",
+                x_title="",
+                y_title="Youth viewership (%)",
+            ),
+            use_container_width=True,
+        )
 
 
 def clean_instagram_data(df):
@@ -167,7 +470,7 @@ df_ig, df_tt = load_data()
 df_ig = clean_instagram_data(df_ig)
 df_tt = clean_tiktok_data(df_tt)
 
-tab1, tab2 = st.tabs(["Instagram", "TikTok"])
+tab1, tab2, tab3, tab4 = st.tabs(["Instagram", "TikTok", "IG Extract", "TT Extract"])
 
 with tab1:
     st.markdown(
@@ -210,12 +513,14 @@ with tab1:
 
     date_range = st.selectbox(
         "Select Date Range",
-        ["All Time", "Last 30 Days", "Last 90 Days", "Custom Range"]
+        ["All Time", "Whole of Prev. Month", "Last 30 Days", "Last 90 Days", "Custom Range"]
     )
 
     df_ig_filtered = df_ig.copy()
 
-    if date_range == "Last 30 Days":
+    if date_range == "Whole of Prev. Month":
+        df_ig_filtered = get_filtered_data(df_ig, date_range)
+    elif date_range == "Last 30 Days":
         cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
         df_ig_filtered = df_ig[df_ig["date"] >= cutoff]
     elif date_range == "Last 90 Days":
@@ -231,15 +536,7 @@ with tab1:
             max_value=max_date,
         )
 
-        if isinstance(custom_range, tuple) and len(custom_range) == 2:
-            start_date, end_date = custom_range
-        elif isinstance(custom_range, list) and len(custom_range) == 2:
-            start_date, end_date = custom_range
-        elif custom_range:
-            start_date = custom_range
-            end_date = max_date
-        else:
-            start_date, end_date = min_date, max_date
+        start_date, end_date = parse_custom_range(custom_range, min_date, max_date)
 
         start_ts = pd.Timestamp(start_date)
         end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
@@ -581,13 +878,15 @@ with tab2:
 
     tt_date_range = st.selectbox(
         "Select Date Range",
-        ["All Time", "Last 30 Days", "Last 90 Days", "Custom Range"],
+        ["All Time", "Whole of Prev. Month", "Last 30 Days", "Last 90 Days", "Custom Range"],
         key="tt_date_range",
     )
 
     df_tt_filtered = df_tt.copy()
 
-    if tt_date_range == "Last 30 Days":
+    if tt_date_range == "Whole of Prev. Month":
+        df_tt_filtered = get_filtered_data(df_tt, tt_date_range)
+    elif tt_date_range == "Last 30 Days":
         tt_cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
         df_tt_filtered = df_tt[df_tt["date"] >= tt_cutoff]
     elif tt_date_range == "Last 90 Days":
@@ -604,15 +903,7 @@ with tab2:
             key="tt_custom_date_range",
         )
 
-        if isinstance(tt_custom_range, tuple) and len(tt_custom_range) == 2:
-            tt_start_date, tt_end_date = tt_custom_range
-        elif isinstance(tt_custom_range, list) and len(tt_custom_range) == 2:
-            tt_start_date, tt_end_date = tt_custom_range
-        elif tt_custom_range:
-            tt_start_date = tt_custom_range
-            tt_end_date = tt_max_date
-        else:
-            tt_start_date, tt_end_date = tt_min_date, tt_max_date
+        tt_start_date, tt_end_date = parse_custom_range(tt_custom_range, tt_min_date, tt_max_date)
 
         tt_start_ts = pd.Timestamp(tt_start_date)
         tt_end_ts = pd.Timestamp(tt_end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
@@ -846,3 +1137,9 @@ with tab2:
             st.info('No "listing" campaign posts are available for the current TikTok data.')
         else:
             st.dataframe(tt_listing_table, use_container_width=True)
+
+with tab3:
+    render_extract_tab(df_ig, "Instagram", "IG", "ig", 6000)
+
+with tab4:
+    render_extract_tab(df_tt, "TikTok", "TT", "tt", 3000)
