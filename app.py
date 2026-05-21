@@ -133,6 +133,7 @@ def clean_tiktok_data(df):
 
     percent_cols = [
         "engagement_rate",
+        "save_share_rate",
         "percentage_of_videowatched",
         "percentage_of_youthviewers",
     ]
@@ -621,12 +622,13 @@ with tab2:
 
     st.header("TikTok")
     df_tt_display = df_tt_filtered.copy()
-    df_tt_display["save_share_rate"] = (
-        (df_tt_display["saves"] + df_tt_display["share"])
-        .div(df_tt_display["views"].replace(0, pd.NA))
-        .mul(100)
-        .fillna(0)
-    )
+    if "save_share_rate" not in df_tt_display.columns:
+        df_tt_display["save_share_rate"] = (
+            (df_tt_display["saves"] + df_tt_display["share"])
+            .div(df_tt_display["views"].replace(0, pd.NA))
+            .mul(100)
+            .fillna(0)
+        )
 
     tt_pg_posted_col = find_column(df_tt_display, "pg_posted", "pg_posted")
     if tt_pg_posted_col is not None:
